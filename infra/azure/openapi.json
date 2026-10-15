@@ -1,0 +1,46 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Banking Attestation API",
+    "version": "1.0"
+  },
+  "paths": {
+    "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "Health status" } } } },
+    "/robots.txt": { "get": { "operationId": "robots", "responses": { "200": { "description": "Crawler metadata" } } } },
+    "/.env": { "get": { "operationId": "decoyEnvironment", "responses": { "200": { "description": "Synthetic decoy" } } } },
+    "/debug/config": { "get": { "operationId": "decoyDebugConfig", "responses": { "200": { "description": "Synthetic decoy" } } } },
+    "/backup/database.sql": { "get": { "operationId": "decoyDatabaseBackup", "responses": { "200": { "description": "Synthetic decoy" } } } },
+    "/internal/employee/access-review-export.json": { "get": { "operationId": "decoyAccessReview", "responses": { "200": { "description": "Synthetic decoy" } } } },
+    "/internal/employee/audit-export/{tenantId}/{token}": { "get": { "operationId": "canaryAccess", "parameters": [{ "name": "tenantId", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "404": { "description": "Not found" } } } },
+    "/passkeys/register/options": { "post": { "operationId": "registrationOptions", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Registration challenge" } } } },
+    "/passkeys/register/verify": { "post": { "operationId": "registrationVerify", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Registration result" } } } },
+    "/passkeys/auth/options": { "post": { "operationId": "authenticationOptions", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Authentication challenge" } } } },
+    "/passkeys/auth/verify": { "post": { "operationId": "authenticationVerify", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Session token" } } } },
+    "/sync/{documentId}": {
+      "put": { "operationId": "storeEncryptedDocument", "parameters": [{ "name": "documentId", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Stored" } } },
+      "get": { "operationId": "getEncryptedDocument", "parameters": [{ "name": "documentId", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Encrypted document" } } }
+    },
+    "/keys/message": { "post": { "operationId": "registerMessageKey", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Key registered" } } } },
+    "/keys/message/{userId}": { "get": { "operationId": "getMessageKeys", "parameters": [{ "name": "userId", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Public recipient keys" } } } },
+    "/admin/canaries": { "post": { "operationId": "createCanary", "responses": { "201": { "description": "Canary created" } } } },
+    "/admin/alerts": { "get": { "operationId": "listCanaryAlerts", "responses": { "200": { "description": "Tenant-scoped canary alerts, first-hit reauthentication actions, account suspensions, and investigation audit records" } } } },
+    "/admin/audit/public-key": { "get": { "operationId": "getAuditSigningPublicKey", "description": "Return the tenant's RSA public key for independently verifying signed incident and containment evidence. Specify version to retrieve an earlier key version.", "parameters": [{ "name": "version", "in": "query", "required": false, "schema": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,64}$" } }], "responses": { "200": { "description": "Tenant audit signing public key and versioned key ID" }, "400": { "description": "Invalid key version" } } } },
+    "/admin/quarantine/release": { "post": { "operationId": "releaseQuarantine", "description": "Release a suspended account after investigation. Requires a tenant-scoped userId, investigationReference, and investigationSummary.", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Account released and investigation recorded" }, "400": { "description": "Required investigation details are invalid" }, "404": { "description": "Suspended account not found or already released" } } } },
+    "/escrow/public-key": { "get": { "operationId": "getEscrowPublicKey", "responses": { "200": { "description": "Tenant escrow public key" } } } },
+    "/admin/compliance/decrypt": { "post": { "operationId": "complianceDecrypt", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Decrypted compliance payload" } } } },
+    "/admin/compliance/audit": { "get": { "operationId": "complianceAudit", "responses": { "200": { "description": "Escrow access audit" } } } },
+    "/admin/devices/revoke": { "post": { "operationId": "revokeDevice", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "description": "Device revoked" } } } }
+  },
+  "components": {
+    "requestBodies": {
+      "JsonObject": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "type": "object", "additionalProperties": true }
+          }
+        }
+      }
+    }
+  }
+}
