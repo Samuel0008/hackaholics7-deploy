@@ -1,0 +1,40 @@
+<policies>
+  <inbound>
+    <base />
+    <rate-limit-by-key calls="120" renewal-period="60" counter-key="@(context.Request.IpAddress)" />
+    <validate-content
+      unspecified-content-type-action="ignore"
+      max-size="262144"
+      size-exceeded-action="prevent"
+      errors-variable-name="requestBodyValidation">
+      <content type="application/json" validate-as="json" action="prevent" />
+    </validate-content>
+    <cors allow-credentials="false">
+      <allowed-origins>
+        <origin>__ALLOWED_ORIGIN__</origin>
+      </allowed-origins>
+      <allowed-methods preflight-result-max-age="300">
+        <method>GET</method>
+        <method>POST</method>
+        <method>PUT</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>authorization</header>
+        <header>content-type</header>
+      </allowed-headers>
+    </cors>
+    <set-header name="x-bank-gateway-key" exists-action="override">
+      <value>{{function-backend-key}}</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
