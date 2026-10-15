@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "RP_ID": "localhost",
+    "RP_NAME": "Banking Attestation Demo",
+    "EXPECTED_ORIGIN": "http://localhost:3000",
+    "JWT_SECRET": "replace-with-a-random-secret-at-least-32-bytes",
+    "AZURE_API_AUDIENCE": "api://your-api-app-client-id",
+    "BANK_TENANTS_JSON": "{\"your-bank-tenant-guid\":[\"approved-bank-app-client-guid\"]}",
+    "DECOY_TENANT_ID": "",
+    "TABLES_ENDPOINT": "",
+    "ALLOWED_ORIGIN": "http://localhost:3000",
+    "BANK_ESCROW_VAULTS_JSON": "{\"your-bank-tenant-guid\":{\"vaultUrl\":\"https://your-vault-name.vault.azure.net/\",\"keyName\":\"bank-escrow\",\"auditSigningKeyName\":\"bank-audit-signing\"}}"
+  }
+}
