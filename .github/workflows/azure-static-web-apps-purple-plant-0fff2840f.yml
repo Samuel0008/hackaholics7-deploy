@@ -22,6 +22,10 @@ jobs:
       - name: Build And Deploy
         id: builddeploy
         uses: Azure/static-web-apps-deploy@v1
+        env:
+          NEXT_PUBLIC_ENTRA_CLIENT_ID: 6e014910-34c1-4e73-bc47-73a857b35983
+          NEXT_PUBLIC_ENTRA_TENANT_ID: 8c9b0c95-5e24-468d-8abe-d351e1af1ab6
+          NEXT_PUBLIC_ENTRA_API_SCOPE: api://8a9faea3-fc28-4e60-9d45-4fd8e86a50ac/access_as_user
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_PURPLE_PLANT_0FFF2840F }}
           repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)
