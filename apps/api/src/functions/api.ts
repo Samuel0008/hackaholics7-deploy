@@ -23,9 +23,16 @@ import {
   parseEscrowEnvelope,
 } from '../escrow.js';
 import {
+  isDemoComplianceStatus,
+  isDemoDeviceAction,
+  isValidActionReason,
+} from '../device-actions.js';
+import {
   consumeChallenge,
   clearUserReauthentication,
   createCanary,
+  createDeviceAction,
+  decideDeviceAction,
   getCredential,
   getEncryptedDocument,
   getDevice,
@@ -35,9 +42,11 @@ import {
   isUserQuarantined,
   listCanaryAlerts,
   listCredentials,
+  listDeviceActions,
   listEscrowAccesses,
   listMessagePublicKeys,
   recordCanaryAccess,
+  recordDemoDeviceCompliance,
   recordEscrowAccess,
   recordIdentifiedDecoyAccess,
   recordPublicDecoyAccess,
@@ -45,6 +54,7 @@ import {
   saveChallenge,
   saveCredential,
   saveDevice,
+  type StoredDevice,
   saveEncryptedDocument,
   saveMessagePublicKey,
   type StoredCredential,
@@ -540,7 +550,13 @@ app.http('authenticationVerify', {
       tenantId: bank.tenantId,
       sessionVersion,
     });
-    return json(200, { verified: true, token, expiresInSeconds: 900 });
+    return json(200, {
+      verified: true,
+      token,
+      userId: bank.subject,
+      sessionUserId: userId,
+      expiresInSeconds: 900,
+    });
   }),
 });
 
@@ -645,7 +661,7 @@ app.http('getMessageKeys', {
 });
 
 app.http('createCanary', {
-  route: 'admin/canaries',
+  route: 'security/canaries',
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: withBankRole('createCanary', BANK_ROLES.securityAdmin, async (request, _context, bank) => {
@@ -681,7 +697,7 @@ app.http('canaryAccess', {
 });
 
 app.http('canaryAlerts', {
-  route: 'admin/alerts',
+  route: 'security/alerts',
   methods: ['GET'],
   authLevel: 'anonymous',
   handler: withBankRole('canaryAlerts', BANK_ROLES.securityAdmin, async (_request, _context, bank) => {
@@ -689,8 +705,75 @@ app.http('canaryAlerts', {
   }),
 });
 
+app.http('securityDashboardTelemetry', {
+  route: 'security/dashboard/telemetry',
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'securityDashboardTelemetry',
+    BANK_ROLES.securityAdmin,
+    async (_request, _context, bank) => {
+      const alerts = await listCanaryAlerts(100, bank.tenantId);
+      return json(200, {
+        source: 'tenant-decoy-alerts',
+        generatedAt: new Date().toISOString(),
+        capabilities: {
+          decoyAlertHistory: true,
+          sourceIpAttribution: false,
+          networkFingerprinting: false,
+          networkQuarantine: false,
+        },
+        summary: {
+          totalAlerts: alerts.length,
+          identifiedAlerts: alerts.filter((alert) => Boolean(alert.userId)).length,
+          containmentActions: alerts.filter((alert) =>
+            alert.action === 'reauthentication-required' ||
+            alert.action === 'account-suspended'
+          ).length,
+        },
+        alerts,
+      });
+    },
+  ),
+});
+
+app.http('cryptoRegistry', {
+  route: 'security/crypto/registry',
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  handler: withBankRole('cryptoRegistry', BANK_ROLES.securityAdmin, async (_request, _context, bank) => {
+    const [escrowKey, auditSigningKey] = await Promise.all([
+      getEscrowPublicKey(bank.tenantId),
+      getAuditSigningPublicKey(bank.tenantId),
+    ]);
+    return json(200, {
+      storageProvider: 'Azure Table Storage',
+      keys: [
+        {
+          purpose: 'escrow-encryption',
+          keyId: escrowKey.keyId,
+          algorithm: escrowKey.algorithm,
+          keyType: escrowKey.kty,
+        },
+        {
+          purpose: 'audit-signing',
+          keyId: auditSigningKey.keyId,
+          algorithm: auditSigningKey.algorithm,
+          keyType: auditSigningKey.kty,
+        },
+      ],
+      unsupportedClaims: [
+        'hardware-backed client key attestation',
+        'key access counts',
+        'key rotation history',
+        'immutable audit retention',
+      ],
+    });
+  }),
+});
+
 app.http('auditSigningPublicKey', {
-  route: 'admin/audit/public-key',
+  route: 'security/audit/public-key',
   methods: ['GET'],
   authLevel: 'anonymous',
   handler: withBankRole(
@@ -709,7 +792,7 @@ app.http('auditSigningPublicKey', {
 });
 
 app.http('releaseQuarantine', {
-  route: 'admin/quarantine/release',
+  route: 'security/quarantine/release',
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: withBankRole(
@@ -756,13 +839,23 @@ app.http('escrowPublicKey', {
 });
 
 app.http('complianceDecrypt', {
-  route: 'admin/compliance/decrypt',
+  route: 'security/compliance/decrypt',
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: withBankRole('complianceDecrypt', BANK_ROLES.compliance, async (request, _context, bank) => {
     const body = await readJson(request);
-    if (!body || !isSafeUserId(body.userId) || !isSafeId(body.documentId)) {
-      return json(400, { error: 'Provide a valid userId and documentId.' });
+    if (
+      !body ||
+      !isSafeUserId(body.userId) ||
+      !isSafeId(body.documentId) ||
+      !isSafeId(body.caseReference) ||
+      typeof body.reason !== 'string' ||
+      body.reason.trim().length < 20 ||
+      body.reason.trim().length > 2000
+    ) {
+      return json(400, {
+        error: 'Provide a valid userId, documentId, caseReference, and a 20-2000 character reason.',
+      });
     }
 
     const userId = scopeBankUserId(bank.tenantId, body.userId);
@@ -796,6 +889,10 @@ app.http('complianceDecrypt', {
         documentId,
         keyId: envelope.keyId,
         occurredAt: new Date().toISOString(),
+        actorId: bank.subject,
+        clientId: bank.clientId,
+        caseReference: body.caseReference,
+        reason: body.reason.trim(),
       });
       return json(200, {
         userId,
@@ -810,7 +907,7 @@ app.http('complianceDecrypt', {
 });
 
 app.http('complianceAudit', {
-  route: 'admin/compliance/audit',
+  route: 'security/compliance/audit',
   methods: ['GET'],
   authLevel: 'anonymous',
   handler: withBankRole('complianceAudit', BANK_ROLES.compliance, async (_request, _context, bank) => {
@@ -819,7 +916,7 @@ app.http('complianceAudit', {
 });
 
 app.http('revokeDevice', {
-  route: 'admin/devices/revoke',
+  route: 'security/devices/revoke',
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: withBankRole('revokeDevice', BANK_ROLES.securityAdmin, async (request, _context, bank) => {
@@ -840,4 +937,192 @@ app.http('revokeDevice', {
       .map((credential) => saveCredential(userId, { ...credential, revoked: true })));
     return json(200, { revoked: true, deviceId });
   }),
+});
+
+app.http('listDemoDeviceActions', {
+  route: 'security/devices/actions',
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'listDemoDeviceActions',
+    BANK_ROLES.securityAdmin,
+    async (_request, _context, bank) => {
+      return json(200, {
+        executionMode: 'simulation-only',
+        actions: await listDeviceActions(bank.tenantId),
+      });
+    },
+  ),
+});
+
+app.http('requestDemoDeviceAction', {
+  route: 'security/devices/actions/request',
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'requestDemoDeviceAction',
+    BANK_ROLES.securityAdmin,
+    async (request, _context, bank) => {
+      const body = await readJson(request);
+      if (
+        !body ||
+        !isSafeUserId(body.userId) ||
+        !isSafeId(body.deviceId) ||
+        !isDemoDeviceAction(body.action) ||
+        !isValidActionReason(body.reason)
+      ) {
+        return json(400, {
+          error: 'Provide a valid userId, deviceId, lock or wipe action, and a 20-500 character reason.',
+        });
+      }
+
+      const userId = scopeBankUserId(bank.tenantId, body.userId);
+      const device = await getDevice(userId, body.deviceId);
+      if (!device) return json(404, { error: 'Device not found.' });
+      if (device.status !== 'active') {
+        return json(409, { error: 'Only active enrolled devices can receive a simulated action request.' });
+      }
+
+      const actionId = randomUUID();
+      const requestedAt = new Date().toISOString();
+      await createDeviceAction({
+        actionId,
+        tenantId: bank.tenantId,
+        userId,
+        deviceId: body.deviceId,
+        action: body.action,
+        reason: body.reason.trim(),
+        requestedBy: bank.subject,
+        requestedAt,
+        status: 'pending-approval',
+      });
+      return json(201, {
+        actionId,
+        status: 'pending-approval',
+        executionMode: 'simulation-only',
+        deviceCommandSent: false,
+        message: 'A different security administrator must approve or reject this request. No device command will be sent.',
+      });
+    },
+  ),
+});
+
+app.http('decideDemoDeviceAction', {
+  route: 'security/devices/actions/decide',
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'decideDemoDeviceAction',
+    BANK_ROLES.securityAdmin,
+    async (request, _context, bank) => {
+      const body = await readJson(request);
+      if (
+        !body ||
+        !isSafeId(body.actionId) ||
+        (body.decision !== 'approve' && body.decision !== 'reject') ||
+        !isValidActionReason(body.reason)
+      ) {
+        return json(400, {
+          error: 'Provide a valid actionId, approve or reject decision, and a 20-500 character reason.',
+        });
+      }
+
+      const result = await decideDeviceAction(
+        bank.tenantId,
+        body.actionId,
+        bank.subject,
+        new Date().toISOString(),
+        body.decision,
+        body.reason.trim(),
+      );
+      if (result === 'not-found') return json(404, { error: 'Device action request not found.' });
+      if (result === 'self-approval') {
+        return json(403, { error: 'The requesting administrator cannot approve or reject their own action request.' });
+      }
+      if (result === 'already-decided' || result === 'conflict') {
+        return json(409, { error: 'The action request is no longer pending; refresh the action list.' });
+      }
+
+      return json(200, {
+        actionId: body.actionId,
+        status: body.decision === 'approve' ? 'approved-simulation-only' : 'rejected',
+        executionMode: 'simulation-only',
+        deviceCommandSent: false,
+      });
+    },
+  ),
+});
+
+app.http('recordDemoDeviceCompliance', {
+  route: 'security/devices/compliance/demo',
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'recordDemoDeviceCompliance',
+    BANK_ROLES.securityAdmin,
+    async (request, _context, bank) => {
+      const body = await readJson(request);
+      if (
+        !body ||
+        !isSafeUserId(body.userId) ||
+        !isSafeId(body.deviceId) ||
+        !isDemoComplianceStatus(body.status) ||
+        !isValidActionReason(body.note)
+      ) {
+        return json(400, {
+          error: 'Provide a valid userId, deviceId, compliant/noncompliant/unknown status, and a 20-500 character note.',
+        });
+      }
+
+      const userId = scopeBankUserId(bank.tenantId, body.userId);
+      const device = await getDevice(userId, body.deviceId);
+      if (!device) return json(404, { error: 'Device not found.' });
+      const occurredAt = new Date().toISOString();
+      const updatedDevice: StoredDevice = {
+        ...device,
+        demoComplianceStatus: body.status,
+        demoComplianceAt: occurredAt,
+        demoComplianceNote: body.note.trim(),
+      };
+      await recordDemoDeviceCompliance(updatedDevice, bank.tenantId, bank.subject, occurredAt);
+      return json(200, {
+        deviceId: body.deviceId,
+        compliance: {
+          status: body.status,
+          source: 'demo-admin-input',
+          authoritative: false,
+          recordedAt: occurredAt,
+        },
+      });
+    },
+  ),
+});
+
+app.http('getDemoDeviceCompliance', {
+  route: 'security/devices/compliance/demo',
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  handler: withBankRole(
+    'getDemoDeviceCompliance',
+    BANK_ROLES.securityAdmin,
+    async (request, _context, bank) => {
+      const employeeId = request.query.get('userId');
+      const deviceId = request.query.get('deviceId');
+      if (!isSafeUserId(employeeId) || !isSafeId(deviceId)) {
+        return json(400, { error: 'Provide a valid userId and deviceId query parameter.' });
+      }
+
+      const device = await getDevice(scopeBankUserId(bank.tenantId, employeeId), deviceId);
+      if (!device) return json(404, { error: 'Device not found.' });
+      return json(200, {
+        deviceId,
+        compliance: {
+          status: device.demoComplianceStatus ?? 'unknown',
+          source: device.demoComplianceStatus ? 'demo-admin-input' : 'not-reported',
+          authoritative: false,
+          ...(device.demoComplianceAt ? { recordedAt: device.demoComplianceAt } : {}),
+        },
+      });
+    },
+  ),
 });

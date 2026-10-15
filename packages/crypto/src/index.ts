@@ -150,7 +150,7 @@ export async function registerDeviceEncryptionKey(
     throw new Error('Browser did not produce an exportable public and non-extractable private key.');
   }
 
-  const response = await fetch(new URL('/api/keys/message', apiBaseUrl), {
+  const response = await fetch(new URL('/api/bff/bank/keys/message', apiBaseUrl), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${sessionToken}`,
@@ -271,7 +271,7 @@ export async function getRecipientMessageKeys(
   userId: string,
 ): Promise<MessagePublicKey[]> {
   const response = await fetch(
-    new URL(`/api/keys/message/${encodeURIComponent(userId)}`, apiBaseUrl),
+    new URL(`/api/bff/bank/keys/message/${encodeURIComponent(userId)}`, apiBaseUrl),
     { headers: { authorization: `Bearer ${sessionToken}` } },
   );
   if (!response.ok) {
@@ -309,7 +309,7 @@ export async function sendEncryptedMessage(
   plaintext: Uint8Array<ArrayBuffer>,
   recipient: MessagePublicKey,
 ): Promise<EncryptedMessageEnvelope> {
-  const escrowResponse = await fetch(new URL('/api/escrow/public-key', apiBaseUrl), {
+  const escrowResponse = await fetch(new URL('/api/bff/bank/escrow/public-key', apiBaseUrl), {
     headers: { authorization: `Bearer ${sessionToken}` },
   });
   if (!escrowResponse.ok) {
@@ -334,7 +334,7 @@ export async function sendEncryptedMessage(
     escrow,
   );
   const response = await fetch(
-    new URL(`/api/sync/${encodeURIComponent(documentId)}`, apiBaseUrl),
+    new URL(`/api/bff/bank/sync/${encodeURIComponent(documentId)}`, apiBaseUrl),
     {
       method: 'PUT',
       headers: {
@@ -356,7 +356,7 @@ export async function fetchEncryptedMessage(
   documentId: string,
 ): Promise<EncryptedMessageEnvelope> {
   const response = await fetch(
-    new URL(`/api/sync/${encodeURIComponent(documentId)}`, apiBaseUrl),
+    new URL(`/api/bff/bank/sync/${encodeURIComponent(documentId)}`, apiBaseUrl),
     { headers: { authorization: `Bearer ${sessionToken}` } },
   );
   if (!response.ok) {

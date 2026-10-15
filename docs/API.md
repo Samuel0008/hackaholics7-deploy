@@ -4,7 +4,7 @@ Integration guide for the prototype API. This service is a demonstration backend
 
 ## Environments and base URLs
 
-For an Azure deployment, use the API Management gateway URL printed by the deployment script:
+With API Management enabled, use the gateway URL printed by the deployment script:
 
 ```text
 https://<api-management-name>.azure-api.net/v1
@@ -16,13 +16,21 @@ For local Azure Functions Core Tools:
 http://localhost:7071/api
 ```
 
-The Azure gateway injects the private Function gateway header. Clients must not call the Function hostname directly or send a gateway secret. All examples below use `BASE_URL` for the appropriate base URL.
+For a Function-only Azure deployment, use the Function URL printed by the deployment script:
+
+```text
+https://<function-app-name>.azurewebsites.net/api
+```
+
+In API Management mode, clients call the gateway and must not call the Function hostname directly or send a gateway secret. The deployment restricts Function and SCM ingress to the Azure API Management service tag after publishing and also requires a private gateway header that APIM injects. This blocks ordinary direct public calls, but the service tag is shared by Azure APIM instances; the secret remains an additional backend check. Function-only mode does not set the gateway secret and intentionally has no APIM ingress restriction, rate limit, or body-size limit. Do not use Function-only mode for a publicly reachable deployment. All examples below use `BASE_URL` for the selected deployment.
+
+The current APIM policy limits each client IP to 120 requests per 60 seconds and JSON request bodies to 256 KiB, and restricts browser CORS to the configured frontend origin. These are gateway protections, not per-employee quotas; multiple employees behind the same corporate NAT share an IP counter. Rate limiting is approximate under distributed load.
 
 ## Authentication
 
 There are two bearer-token types. Do not interchange them.
 
-1. **Microsoft Entra delegated access token** — used for passkey registration/authentication and administrative endpoints. The user token must target the configured API audience, come from an allowlisted tenant and client application, include a delegated scope, and contain the endpoint's required app role. App-only/client-credential tokens are rejected.
+1. **Microsoft Entra delegated access token** — used for passkey registration/authentication and administrative endpoints. The user token must target the configured API audience, come from an allowlisted tenant and client application, contain the exact `access_as_user` delegated scope, and contain the endpoint's required app role assigned to that signed-in user. App-only/client-credential tokens and tokens containing only unrelated scopes are rejected.
 2. **API session token** — returned after a successful passkey assertion. It is a 15-minute bearer token used for employee data operations such as encrypted document relay, message-key registration, and escrow public-key discovery.
 
 | Role | Intended use |
@@ -103,7 +111,13 @@ Content-Type: application/json
 Success (`200`):
 
 ```json
-{ "verified": true, "token": "<api-session-token>", "expiresInSeconds": 900 }
+{
+  "verified": true,
+  "token": "<api-session-token>",
+  "userId": "<Entra-object-id>",
+  "sessionUserId": "<tenant-scoped-user-id>",
+  "expiresInSeconds": 900
+}
 ```
 
 Use this session token for the following employee data operations:
@@ -111,6 +125,8 @@ Use this session token for the following employee data operations:
 ```http
 Authorization: Bearer <api-session-token>
 ```
+
+The frontend registers a separate RSA-OAEP-3072 public encryption key after successful passkey authentication. Its non-extractable private key remains in that browser's IndexedDB; this is browser-origin storage, not a claim of TPM/Secure Enclave attestation. The employee portal includes a non-sensitive encrypted-message round-trip test that encrypts locally, stores only the envelope through the BFF, downloads it, and decrypts it locally. The current sync API stores documents in the authenticated employee's own partition, so this UI tests self-retrieval rather than cross-user sharing.
 
 After a first identified decoy hit, existing sessions are invalidated and fresh passkey authentication is required. A second identified hit within 24 hours suspends the account pending a security-admin investigation. A decoy hit is an interaction signal, not proof of malicious intent.
 
@@ -181,7 +197,7 @@ All routes in this section require an Entra delegated token with `Bank.SecurityA
 ### Create a one-time canary
 
 ```http
-POST {BASE_URL}/admin/canaries
+POST {BASE_URL}/security/canaries
 Authorization: Bearer <security-admin-entra-token>
 ```
 
@@ -196,7 +212,7 @@ Treat the URL as a secret: anyone who accesses it can consume the one-time canar
 ### List tenant alerts
 
 ```http
-GET {BASE_URL}/admin/alerts
+GET {BASE_URL}/security/alerts
 Authorization: Bearer <security-admin-entra-token>
 ```
 
@@ -207,14 +223,14 @@ Returns `{ "alerts": [...] }` with up to the latest 100 tenant-attributed alerts
 Retrieve the tenant's current signing key:
 
 ```http
-GET {BASE_URL}/admin/audit/public-key
+GET {BASE_URL}/security/audit/public-key
 Authorization: Bearer <security-admin-entra-token>
 ```
 
 Retrieve an earlier version by its Key Vault key version:
 
 ```http
-GET {BASE_URL}/admin/audit/public-key?version=<key-version>
+GET {BASE_URL}/security/audit/public-key?version=<key-version>
 Authorization: Bearer <security-admin-entra-token>
 ```
 
@@ -225,7 +241,7 @@ The response contains `publicKey` with `keyId`, `algorithm: "RS256"`, `kty: "RSA
 `userId` must be the tenant-scoped ID shown in that tenant's alert:
 
 ```http
-POST {BASE_URL}/admin/quarantine/release
+POST {BASE_URL}/security/quarantine/release
 Authorization: Bearer <security-admin-entra-token>
 Content-Type: application/json
 ```
@@ -245,7 +261,7 @@ The reference must be 3-128 characters; the summary must be 20-2000 characters. 
 For this endpoint, `userId` is the employee's Entra object ID (different from the tenant-scoped alert ID):
 
 ```http
-POST {BASE_URL}/admin/devices/revoke
+POST {BASE_URL}/security/devices/revoke
 Authorization: Bearer <security-admin-entra-token>
 Content-Type: application/json
 ```
@@ -256,22 +272,105 @@ Content-Type: application/json
 
 Success: `{ "revoked": true, "deviceId": "..." }`. The device and its passkeys are revoked for future API access. This does not lock, locate, or erase a device.
 
+### Simulated device-compliance and response workflow
+
+These demo routes do not connect to Intune, Jamf, a phone vendor, TPM, or any endpoint agent. Compliance values are explicitly administrator-entered simulation data and are not verified device posture. Lock and wipe requests are recorded for workflow demonstrations only; even an approved request never sends a command to a device.
+
+Record a simulated compliance status for an enrolled device:
+
+```http
+POST {BASE_URL}/security/devices/compliance/demo
+Authorization: Bearer <Entra delegated token with Bank.SecurityAdmin>
+Content-Type: application/json
+```
+
+```json
+{
+  "userId": "<employee-Entra-object-id>",
+  "deviceId": "<device-id-from-registration>",
+  "status": "noncompliant",
+  "note": "Demo simulation: the device is reported as missing its required update."
+}
+```
+
+`status` is `compliant`, `noncompliant`, or `unknown`; the note must be 20-500 characters. The response marks the value `source: "demo-admin-input"` and `authoritative: false`. The entry is included in the tenant's signed alert feed.
+
+Retrieve the demo status with the same tenant-scoped employee object ID and device ID:
+
+```http
+GET {BASE_URL}/security/devices/compliance/demo?userId=<employee-Entra-object-id>&deviceId=<device-id>
+Authorization: Bearer <Entra delegated token with Bank.SecurityAdmin>
+```
+
+An unreported device returns `status: "unknown"` with `source: "not-reported"`; every result has `authoritative: false`.
+
+Create a simulated lock or wipe request. The requester must be a security administrator and the target must be an active enrolled device:
+
+```http
+POST {BASE_URL}/security/devices/actions/request
+Authorization: Bearer <Entra delegated token with Bank.SecurityAdmin>
+Content-Type: application/json
+```
+
+```json
+{
+  "userId": "<employee-Entra-object-id>",
+  "deviceId": "<device-id-from-registration>",
+  "action": "lock",
+  "reason": "Employee reported the device lost; this is a tabletop simulation."
+}
+```
+
+`action` may be `lock` or `wipe`; the reason must be 20-500 characters. Success (`201`) returns an `actionId` in `pending-approval` status. A different security administrator must decide it. The requester cannot approve or reject their own request.
+
+List up to 100 tenant-scoped demo requests:
+
+```http
+GET {BASE_URL}/security/devices/actions
+Authorization: Bearer <Entra delegated token with Bank.SecurityAdmin>
+```
+
+Approve or reject a request with a distinct administrator and a 20-500 character decision reason:
+
+```http
+POST {BASE_URL}/security/devices/actions/decide
+Authorization: Bearer <Entra delegated token with Bank.SecurityAdmin>
+Content-Type: application/json
+```
+
+```json
+{
+  "actionId": "<action-id-from-request>",
+  "decision": "approve",
+  "reason": "Second administrator verified the tabletop incident details."
+}
+```
+
+Approval yields `approved-simulation-only`; rejection yields `rejected`. Every response states `executionMode: "simulation-only"` and `deviceCommandSent: false`. Requests and decisions are recorded as tenant-scoped signed audit alerts. These demo records are not immutable compliance storage.
+
+WebAuthn passkeys can use platform authenticators, but a web backend cannot force every phone or computer to use a TPM/Secure Enclave or remotely flash firmware. A real deployment must use the bank's confirmed MDM/endpoint platform, enrolled devices, appropriately authorized administrators, and vendor-supported controls. Do not use these simulated endpoints to claim that a device is locked, wiped, attested, or compliant.
+
 ## Compliance integration
 
 Compliance routes require an Entra delegated token with `Bank.Compliance`.
 
 ### Decrypt a stored envelope
 
-`userId` is the employee's Entra object ID, not the tenant-scoped alert ID:
+`userId` is the employee's Entra object ID, not the tenant-scoped alert ID. Each request must also include a case reference and meaningful business reason. Both are recorded with the verified Entra administrator object ID and caller client ID in the compliance audit and a tenant-signed alert:
 
 ```http
-POST {BASE_URL}/admin/compliance/decrypt
+POST {BASE_URL}/security/compliance/decrypt
 Authorization: Bearer <compliance-entra-token>
 Content-Type: application/json
 ```
 
 ```json
-{ "userId": "<employee-Entra-object-id>", "documentId": "<document-id>" }
+{
+  "userId": "<employee-Entra-object-id>",
+  "documentId": "<document-id>",
+  "caseReference": "CASE-12345",
+  "reason": "Approved investigation of the employee-reported financial discrepancy."
+}
 ```
 
 Success returns plaintext bytes encoded as base64url:
@@ -280,20 +379,30 @@ Success returns plaintext bytes encoded as base64url:
 { "userId": "<employee-Entra-object-id>", "documentId": "...", "plaintextBase64Url": "...", "encoding": "base64url" }
 ```
 
-The plaintext is not stored or logged by the API. The client is responsible for decoding the base64url value and handling the plaintext securely. Successful decryptions are recorded in the compliance audit list.
+`caseReference` must contain 3-128 safe characters; `reason` must contain 20-2000 characters. The plaintext is not stored or logged by the API. The client is responsible for decoding the base64url value and handling the plaintext securely. Successful decryptions are recorded with the Entra actor, API client, case reference, and reason in the compliance audit list and signed tenant alert. Successful audit recording is required before returning plaintext. Entra role assignment remains the bank's responsibility and should be restricted to authorized compliance personnel.
 
 ### Read the compliance-decryption audit
 
 ```http
-GET {BASE_URL}/admin/compliance/audit
+GET {BASE_URL}/security/compliance/audit
 Authorization: Bearer <compliance-entra-token>
 ```
 
 Returns `{ "entries": [...] }` for up to 100 successful decryptions in the last 30 days, filtered to the caller's tenant.
 
+### Dashboard alert history
+
+`GET /security/dashboard/telemetry` requires `Bank.SecurityAdmin`. It returns tenant-scoped decoy alerts and counts, with the explicit source `tenant-decoy-alerts`. It does **not** return source IP addresses, network fingerprints, generalized threat scores, or network quarantine controls. The SOC frontend must not represent this alert history as a live network threat-detection feed.
+
+### Cryptographic registry metadata
+
+`GET /security/crypto/registry` requires `Bank.SecurityAdmin`. It returns the configured Key Vault escrow-encryption and audit-signing public-key identifiers and algorithms. It does not report key access counts, rotation history, client hardware attestation, or immutable audit retention. `GET /security/audit/public-key` remains available for retrieving the versioned audit-verification public key.
+
+The current API does not implement AML/OFAC transaction screening, IP/firewall quarantine, automated client decoy synchronization, general network telemetry, or MDM/TPM attestation. Those integrations require approved data sources and enforcement providers; the frontend labels them unavailable rather than returning synthetic success.
+
 ## Public and decoy routes
 
-These endpoints need no employee bearer token, but Azure deployments still require the API Management gateway. They return synthetic content only and may record a hit:
+These endpoints need no employee bearer token. In API Management mode, call them through the gateway; in Function-only mode, call the Function URL directly. They return synthetic content only and may record a hit:
 
 | Method | Path | Behavior |
 |---|---|---|
@@ -315,7 +424,10 @@ The machine-readable API contract is [openapi.json](../infra/azure/openapi.json)
 
 - This prototype is not production-ready; use no real customer or bank data.
 - Configure Entra tenant/client allowlists, audience, roles, WebAuthn relying-party values, storage, and tenant Key Vault keys before use.
+- Protected operations require the exact delegated API scope plus a role assigned to the verified Entra user. Security-admin and compliance routes are separately role-gated; successful escrow decryptions require a case reference and reason and are attributed to the actor/client.
 - Keep local settings, tokens, Key Vault credentials, and canary URLs private. Do not upload `apps/api/local.settings.json`, Azurite data, build output, or dependencies.
-- Anonymous decoy alert limiting is in-memory and per Function instance. Use gateway controls and durable production rate limits.
+- The APIM deployment mode applies per-IP gateway rate limiting, JSON body-size limits, CORS, a gateway-only shared header, and Function/SCM ingress restrictions to the APIM service tag. The service tag is shared across APIM instances and is not private networking. Function-only mode has no gateway rate limiting or network restriction and must not be publicly exposed.
+- Azure Monitor sends Function 5xx and verified decoy-containment alerts to the configured security mailbox. Alert delivery and incident handling must be tested by the bank; this prototype does not provide an on-call service or automatically investigate incidents.
+- Key Vault rotates escrow and audit-signing key versions on a schedule. Preserve previous versions for existing encrypted envelopes and signature verification. Geo-redundant Table Storage supports regional durability but not point-in-time recovery from accidental or malicious writes; configure and test separate backups before storing important data.
 - Table Storage alerts are not immutable compliance records. Signed evidence protects payload integrity but is not a substitute for immutable retention, independent key trust, or a formal audit system.
 - The service provides decoy-triggered containment, not general attacker detection; false positives and authorized testing can trigger the response.

@@ -3,6 +3,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { randomUUID } from 'node:crypto';
 import { signAuditPayload } from './escrow.js';
 import type { AuditPayload } from './audit.js';
+import type { DeviceActionRecord } from './device-actions.js';
 
 const tableNames = {
   challenges: 'DemoChallenges',
@@ -14,6 +15,7 @@ const tableNames = {
   alerts: 'DemoAlerts',
   escrowAudits: 'DemoEscrowAudits',
   userSecurity: 'DemoUserSecurity',
+  deviceActions: 'DemoDeviceActions',
 } as const;
 
 const clients = new Map<keyof typeof tableNames, TableClient>();
@@ -115,6 +117,9 @@ export interface StoredDevice {
   deviceId: string;
   status: 'active' | 'revoked';
   createdAt: string;
+  demoComplianceStatus?: 'compliant' | 'noncompliant' | 'unknown';
+  demoComplianceAt?: string;
+  demoComplianceNote?: string;
 }
 
 export interface DecoyAccess {
@@ -276,7 +281,35 @@ export async function saveDevice(device: StoredDevice): Promise<void> {
     deviceId: device.deviceId,
     status: device.status,
     createdAt: device.createdAt,
+    ...(device.demoComplianceStatus
+      ? { demoComplianceStatus: device.demoComplianceStatus }
+      : {}),
+    ...(device.demoComplianceAt ? { demoComplianceAt: device.demoComplianceAt } : {}),
+    ...(device.demoComplianceNote ? { demoComplianceNote: device.demoComplianceNote } : {}),
   }, 'Replace');
+}
+
+export async function recordDemoDeviceCompliance(
+  device: StoredDevice,
+  tenantId: string,
+  reportedBy: string,
+  occurredAt: string,
+): Promise<void> {
+  await saveDevice(device);
+  await createAuditAlert({
+    type: 'demo-device-compliance-recorded',
+    canaryId: device.deviceId,
+    occurredAt,
+    tenantId,
+    userId: device.userId,
+    deviceId: device.deviceId,
+    complianceStatus: device.demoComplianceStatus ?? 'unknown',
+    complianceSource: 'demo-admin-input',
+    authoritative: false,
+    reportedBy,
+    note: device.demoComplianceNote ?? '',
+    severity: 'audit',
+  });
 }
 
 export async function getDevice(
@@ -290,6 +323,146 @@ export async function getDevice(
     if (hasStatusCode(error, 404)) return undefined;
     throw error;
   }
+}
+
+export async function createDeviceAction(action: DeviceActionRecord): Promise<void> {
+  await initialize();
+  await table('deviceActions').createEntity({
+    partitionKey: action.tenantId,
+    rowKey: action.actionId,
+    ...action,
+  });
+  await createAuditAlert({
+    type: 'demo-device-action-requested',
+    canaryId: action.actionId,
+    occurredAt: action.requestedAt,
+    tenantId: action.tenantId,
+    userId: action.userId,
+    deviceId: action.deviceId,
+    action: action.action,
+    status: action.status,
+    requestedBy: action.requestedBy,
+    reason: action.reason,
+    executionMode: 'simulation-only',
+    deviceCommandSent: false,
+    severity: 'audit',
+  });
+}
+
+export async function listDeviceActions(
+  tenantId: string,
+  limit = 100,
+): Promise<DeviceActionRecord[]> {
+  await initialize();
+  const actions: DeviceActionRecord[] = [];
+  for await (const entity of table('deviceActions').listEntities<
+    TableEntity & DeviceActionRecord
+  >({
+    queryOptions: {
+      filter: `PartitionKey eq '${tenantId}'`,
+      select: [
+        'actionId',
+        'tenantId',
+        'userId',
+        'deviceId',
+        'action',
+        'reason',
+        'requestedBy',
+        'requestedAt',
+        'status',
+        'decidedBy',
+        'decidedAt',
+        'decisionReason',
+      ],
+    },
+  })) {
+    if (entity.tenantId !== tenantId) continue;
+    actions.push({
+      actionId: entity.actionId,
+      tenantId: entity.tenantId,
+      userId: entity.userId,
+      deviceId: entity.deviceId,
+      action: entity.action,
+      reason: entity.reason,
+      requestedBy: entity.requestedBy,
+      requestedAt: entity.requestedAt,
+      status: entity.status,
+      ...(typeof entity.decidedBy === 'string' ? { decidedBy: entity.decidedBy } : {}),
+      ...(typeof entity.decidedAt === 'string' ? { decidedAt: entity.decidedAt } : {}),
+      ...(typeof entity.decisionReason === 'string'
+        ? { decisionReason: entity.decisionReason }
+        : {}),
+    });
+    if (actions.length >= limit) break;
+  }
+  return actions.sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+}
+
+export async function decideDeviceAction(
+  tenantId: string,
+  actionId: string,
+  decidedBy: string,
+  decidedAt: string,
+  decision: 'approve' | 'reject',
+  decisionReason?: string,
+): Promise<'decided' | 'not-found' | 'already-decided' | 'self-approval' | 'conflict'> {
+  await initialize();
+  const client = table('deviceActions');
+  let entity: TableEntity & DeviceActionRecord;
+  try {
+    entity = await client.getEntity<TableEntity & DeviceActionRecord>(
+      tenantId,
+      actionId,
+    );
+  } catch (error) {
+    if (hasStatusCode(error, 404)) return 'not-found';
+    throw error;
+  }
+  if (entity.tenantId !== tenantId) return 'not-found';
+  if (entity.status !== 'pending-approval') return 'already-decided';
+  if (entity.requestedBy === decidedBy) return 'self-approval';
+  if (typeof entity.etag !== 'string') {
+    throw new Error('Stored device action is missing its concurrency token.');
+  }
+
+  const status = decision === 'approve'
+    ? 'approved-simulation-only'
+    : 'rejected';
+  try {
+    await client.updateEntity({
+      partitionKey: tenantId,
+      rowKey: actionId,
+      tenantId,
+      actionId,
+      status,
+      decidedBy,
+      decidedAt,
+      ...(decisionReason ? { decisionReason } : {}),
+    }, 'Merge', { etag: entity.etag });
+  } catch (error) {
+    if (hasStatusCode(error, 412)) return 'conflict';
+    throw error;
+  }
+
+  await createAuditAlert({
+    type: decision === 'approve'
+      ? 'demo-device-action-approved'
+      : 'demo-device-action-rejected',
+    canaryId: actionId,
+    occurredAt: decidedAt,
+    tenantId,
+    userId: entity.userId,
+    deviceId: entity.deviceId,
+    action: entity.action,
+    status,
+    requestedBy: entity.requestedBy,
+    decidedBy,
+    ...(decisionReason ? { decisionReason } : {}),
+    executionMode: 'simulation-only',
+    deviceCommandSent: false,
+    severity: 'audit',
+  });
+  return 'decided';
 }
 
 export async function isUserQuarantined(userId: string): Promise<boolean> {
@@ -785,6 +958,10 @@ export interface EscrowAuditEntry {
   documentId: string;
   keyId: string;
   occurredAt: string;
+  actorId?: string;
+  clientId?: string;
+  caseReference?: string;
+  reason?: string;
 }
 
 export async function recordEscrowAccess(entry: EscrowAuditEntry): Promise<void> {
@@ -797,6 +974,24 @@ export async function recordEscrowAccess(entry: EscrowAuditEntry): Promise<void>
     documentId: entry.documentId,
     keyId: entry.keyId,
     occurredAt: entry.occurredAt,
+    ...(entry.actorId ? { actorId: entry.actorId } : {}),
+    ...(entry.clientId ? { clientId: entry.clientId } : {}),
+    ...(entry.caseReference ? { caseReference: entry.caseReference } : {}),
+    ...(entry.reason ? { reason: entry.reason } : {}),
+  });
+  await createAuditAlert({
+    type: 'compliance-decryption',
+    canaryId: entry.documentId,
+    occurredAt: entry.occurredAt,
+    tenantId: entry.tenantId,
+    userId: entry.userId,
+    ...(entry.actorId ? { actorId: entry.actorId } : {}),
+    ...(entry.clientId ? { clientId: entry.clientId } : {}),
+    ...(entry.caseReference ? { caseReference: entry.caseReference } : {}),
+    ...(entry.reason ? { reason: entry.reason } : {}),
+    keyId: entry.keyId,
+    severity: 'high',
+    action: 'escrow-document-decrypted',
   });
 }
 
@@ -824,6 +1019,12 @@ export async function listEscrowAccesses(limit: number, tenantId: string): Promi
         documentId: entity.documentId,
         keyId: entity.keyId,
         occurredAt: entity.occurredAt,
+        ...(typeof entity.actorId === 'string' ? { actorId: entity.actorId } : {}),
+        ...(typeof entity.clientId === 'string' ? { clientId: entity.clientId } : {}),
+        ...(typeof entity.caseReference === 'string'
+          ? { caseReference: entity.caseReference }
+          : {}),
+        ...(typeof entity.reason === 'string' ? { reason: entity.reason } : {}),
       });
     }
   }

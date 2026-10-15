@@ -42,6 +42,11 @@ test('recognizes only delegated Entra user claims for employee identity', () => 
   assert.equal(isDelegatedUserClaims({ ...delegated, idtyp: 'app' }), false);
   assert.equal(isDelegatedUserClaims({ oid: delegated.oid }), false);
   assert.equal(isDelegatedUserClaims({ ...delegated, oid: 'service-principal' }), false);
+  assert.equal(isDelegatedUserClaims({ ...delegated, scp: 'profile email' }), false);
+  assert.equal(isDelegatedUserClaims({
+    ...delegated,
+    scp: 'profile access_as_user email',
+  }), true);
 });
 
 test('session tokens carry a version and reject tokens without one', async () => {

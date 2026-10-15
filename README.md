@@ -28,10 +28,12 @@ Never commit `apps/api/local.settings.json`, credentials, access tokens, local s
 
 ## Security and deployment notes
 
-- The API uses Entra delegated app-role tokens for protected employee and admin routes; API session tokens are a separate credential.
+- The API requires the exact Entra `access_as_user` delegated scope, an approved tenant/client, and the per-user role required for each operation; employee sessions are bound to the verified tenant, user, and active device.
+- Compliance decryption requires a case reference and reason, records the verified actor/client, and writes a tenant-signed audit alert.
 - Employee encryption keys are generated client-side. Escrow decryption is intentionally possible to authorized compliance roles, so this is not user-only end-to-end encryption.
 - A verified decoy hit triggers a defensive policy; it is not proof of malicious intent. A first hit forces fresh passkey authentication, while a second identified hit within 24 hours suspends the account pending investigation.
+- Security-admin device compliance and lock/wipe workflows are simulation-only: compliance is manually entered and non-authoritative; approvals never send device commands; and there is no TPM, firmware-flashing, or MDM integration.
 - Tenant-attributed incident evidence can be signed with a Key Vault key. Signatures do not make the underlying Table Storage immutable.
-- Review the deployment and limitations in [apps/api/README.md](apps/api/README.md) before creating Azure resources. Deployment can incur cloud charges and requires explicit opt-in.
+- Review deployment modes and limitations in [apps/api/README.md](apps/api/README.md). The default Azure deployment uses Basic APIM with per-IP rate limits and a request-size limit, then restricts Function and SCM ingress to the APIM service tag while retaining a private gateway header. Function-only mode omits these protections and is not for public exposure. Deployment publishes the API—not the entire repository—enables Key Vault key rotation, and sends Function 5xx alerts to a required security mailbox. Azure resources incur charges and require explicit opt-in.
 
 This project requires independent security, privacy, and operational review before any real-data or production use.

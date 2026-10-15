@@ -19,18 +19,20 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$RelyingPartyName,
   [Parameter(Mandatory = $true)]
+  [string]$SecurityContactEmail,
   [string]$PublisherEmail,
-  [Parameter(Mandatory = $true)]
   [string]$PublisherName,
   [ValidateSet('standard', 'premium')]
   [string]$KeyVaultSku = 'standard',
+  [switch]$PreviewOnly,
+  [switch]$FunctionOnly,
   [switch]$Deploy
 )
 
 $ErrorActionPreference = 'Stop'
 
-if (-not $Deploy) {
-  throw 'No cloud resources were created. Re-run with -Deploy only after reviewing the README cost and deployment notes.'
+if (-not $Deploy -and -not $PreviewOnly) {
+  throw 'No cloud resources were created. Use -PreviewOnly to review the Azure changes, or -Deploy after reviewing the cost and deployment notes.'
 }
 
 if ($AllowedOrigin -notmatch '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$') {
@@ -45,8 +47,14 @@ if ($ApiAudience -notmatch '^[A-Za-z0-9:/._-]{1,256}$') {
 if ($ApprovedClientIds.Count -eq 0) {
   throw 'At least one approved caller application client ID is required.'
 }
-if ($PublisherEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+if (-not $FunctionOnly -and $PublisherEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
   throw 'PublisherEmail must be a valid email address.'
+}
+if (-not $FunctionOnly -and [string]::IsNullOrWhiteSpace($PublisherName)) {
+  throw 'PublisherName is required when API Management is enabled.'
+}
+if ($SecurityContactEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+  throw 'SecurityContactEmail must be the monitored security operations mailbox.'
 }
 if (-not (Get-Command az.cmd -ErrorAction SilentlyContinue)) {
   throw 'Azure CLI is not installed. Install it from Microsoft, then run az login.'
@@ -107,6 +115,7 @@ function Test-CommandSucceeded([string]$Action) {
 
 Push-Location $apiDirectory
 $secureParameterFile = Join-Path $env:TEMP "bank-attestation-$deploymentId.parameters.json"
+$bootstrapParameterFile = Join-Path $env:TEMP "bank-attestation-$deploymentId-bootstrap.parameters.json"
 try {
   Write-Host 'Running the API build and tests before creating Azure resources...'
   & npm.cmd test
@@ -114,11 +123,15 @@ try {
   & az.cmd bicep build --file $templatePath --stdout | Out-Null
   Test-CommandSucceeded 'Bicep template compilation'
 
-  $openApiPath = Join-Path $PSScriptRoot 'openapi.json'
-  $null = Get-Content -Raw -LiteralPath $openApiPath | ConvertFrom-Json
-  $policyPath = Join-Path $PSScriptRoot '..\..\infrastructure\apim-policy.xml'
-  $parsedPolicy = [xml](Get-Content -Raw -LiteralPath $policyPath).Replace('__ALLOWED_ORIGIN__', $AllowedOrigin)
+  if (-not $FunctionOnly) {
+    $openApiPath = Join-Path $PSScriptRoot 'openapi.json'
+    $null = Get-Content -Raw -LiteralPath $openApiPath | ConvertFrom-Json
+    $policyPath = Join-Path $PSScriptRoot '..\..\infrastructure\apim-policy.xml'
+    $parsedPolicy = [xml](Get-Content -Raw -LiteralPath $policyPath).Replace('__ALLOWED_ORIGIN__', $AllowedOrigin)
+  }
 
+  $effectivePublisherEmail = if ($FunctionOnly) { 'prototype@example.invalid' } else { $PublisherEmail }
+  $effectivePublisherName = if ($FunctionOnly) { 'Prototype API' } else { $PublisherName }
   $parameters = @{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
     contentVersion = '1.0.0.0'
@@ -129,6 +142,8 @@ try {
       apiManagementName = @{ value = $apiManagementName }
       logAnalyticsName = @{ value = $logAnalyticsName }
       applicationInsightsName = @{ value = $applicationInsightsName }
+      deployApiManagement = @{ value = -not $FunctionOnly }
+      restrictFunctionIngress = @{ value = $true }
       keyVaultSkuName = @{ value = $KeyVaultSku }
       bankTenantId = @{ value = $bankTenantKey }
       bankTenantsJson = @{ value = ($tenantMap | ConvertTo-Json -Compress -Depth 5) }
@@ -137,8 +152,9 @@ try {
       allowedOrigin = @{ value = $AllowedOrigin }
       relyingPartyId = @{ value = $RelyingPartyId }
       relyingPartyName = @{ value = $RelyingPartyName }
-      publisherEmail = @{ value = $PublisherEmail }
-      publisherName = @{ value = $PublisherName }
+      securityContactEmail = @{ value = $SecurityContactEmail }
+      publisherEmail = @{ value = $effectivePublisherEmail }
+      publisherName = @{ value = $effectivePublisherName }
       sessionJwtSecret = @{ value = New-Base64UrlSecret }
       gatewayHeaderSecret = @{ value = New-Base64UrlSecret }
     }
@@ -146,6 +162,10 @@ try {
   $parameterJson = $parameters | ConvertTo-Json -Depth 8
   $utf8WithoutBom = New-Object System.Text.UTF8Encoding $false
   [System.IO.File]::WriteAllText($secureParameterFile, $parameterJson, $utf8WithoutBom)
+  $parameters.parameters.restrictFunctionIngress.value = $false
+  $bootstrapParameterJson = $parameters | ConvertTo-Json -Depth 8
+  [System.IO.File]::WriteAllText($bootstrapParameterFile, $bootstrapParameterJson, $utf8WithoutBom)
+  $parameters.parameters.restrictFunctionIngress.value = $true
 
   Write-Host "Creating resource group '$ResourceGroupName' in '$Location'..."
   & az.cmd group create --name $ResourceGroupName --location $Location --output none
@@ -159,42 +179,79 @@ try {
     --parameters "@$secureParameterFile" `
     --output table
   Test-CommandSucceeded 'Azure deployment preview'
+  if ($PreviewOnly) {
+    Write-Host 'Preview complete. No billable resources were deployed.'
+    return
+  }
   $confirmation = Read-Host "Type DEPLOY to create resources in '$ResourceGroupName'"
   if ($confirmation -cne 'DEPLOY') {
     throw 'Deployment cancelled; no billable resources were created.'
   }
 
-  Write-Host 'Deploying the single-bank API, APIM gateway, storage, monitoring, and escrow key...'
+  if ($FunctionOnly) {
+    Write-Host 'Deploying Azure Functions, Storage, Key Vault, and monitoring without API Management...'
+  } else {
+    Write-Host 'Creating the API and Azure dependencies behind the gateway header...'
+  }
   $deploymentJson = & az.cmd deployment group create `
     --resource-group $ResourceGroupName `
-    --name "bank-attestation-$deploymentId" `
+      --name "bank-attestation-$deploymentId-bootstrap" `
     --template-file $templatePath `
-    --parameters "@$secureParameterFile" `
+      --parameters "@$bootstrapParameterFile" `
     --output json
-  Test-CommandSucceeded 'Azure infrastructure deployment'
+    Test-CommandSucceeded 'Initial Azure infrastructure deployment'
   $deployment = $deploymentJson | ConvertFrom-Json
 
-  $gatewayUrl = $deployment.properties.outputs.apiManagementGatewayUrl.value
-  $functionName = $deployment.properties.outputs.functionAppName.value
-  if (-not $gatewayUrl -or -not $functionName) {
-    throw 'Deployment completed but required gateway outputs were missing.'
+    $functionUrl = $deployment.properties.outputs.functionAppUrl.value
+    $functionName = $deployment.properties.outputs.functionAppName.value
+    if (-not $functionUrl -or -not $functionName) {
+      throw 'Initial deployment completed but required Function App outputs were missing.'
   }
 
-  Write-Host 'Publishing the API to the Function App using remote build...'
-  & func.cmd azure functionapp publish $functionName --build remote
-  Test-CommandSucceeded 'Function App publish'
+    Write-Host 'Publishing the API before closing direct Function and SCM ingress...'
+    & func.cmd azure functionapp publish $functionName --build remote
+    Test-CommandSucceeded 'Function App publish'
 
-  Write-Host "Testing the API Management health route at $gatewayUrl/health ..."
+    if (-not $FunctionOnly) {
+      Write-Host 'Applying the final API-Management-only Function ingress restriction...'
+      $deploymentJson = & az.cmd deployment group create `
+        --resource-group $ResourceGroupName `
+        --name "bank-attestation-$deploymentId-locked-down" `
+        --template-file $templatePath `
+        --parameters "@$secureParameterFile" `
+        --output json
+      Test-CommandSucceeded 'Final Function ingress restriction deployment'
+      $deployment = $deploymentJson | ConvertFrom-Json
+    }
+
+    $gatewayUrl = if ($FunctionOnly) {
+      $deployment.properties.outputs.functionAppUrl.value
+    } else {
+      $deployment.properties.outputs.apiManagementGatewayUrl.value
+    }
+    if (-not $gatewayUrl -or -not $functionName) {
+      throw 'Deployment completed but required gateway outputs were missing.'
+    }
+
+    Write-Host "Testing the Function API health route at $gatewayUrl/health ..."
   $health = Invoke-RestMethod -Uri "$gatewayUrl/health" -Method Get -TimeoutSec 30
   if ($health.status -ne 'ok') {
     throw 'The gateway health check returned an unexpected response.'
   }
 
-  Write-Host "Deployment completed. API gateway: $gatewayUrl"
-  Write-Host 'Keep the Function App and APIM secret settings private; do not copy them into browser code or logs.'
+  if ($FunctionOnly) {
+    Write-Host "Deployment completed. Function API base URL: $gatewayUrl"
+    Write-Warning 'This direct Function endpoint has no API Management rate limiting or gateway body-size policy. Add a trusted gateway and abuse controls before exposing it broadly.'
+  } else {
+    Write-Host "Deployment completed. API gateway: $gatewayUrl"
+    Write-Host 'Keep the Function App and APIM secret settings private; do not copy them into browser code or logs.'
+  }
 } finally {
   if (Test-Path -LiteralPath $secureParameterFile) {
     Remove-Item -LiteralPath $secureParameterFile -Force
+  }
+  if (Test-Path -LiteralPath $bootstrapParameterFile) {
+    Remove-Item -LiteralPath $bootstrapParameterFile -Force
   }
   Pop-Location
 }

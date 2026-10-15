@@ -20,12 +20,15 @@ export interface BankIdentity {
   roles: string[];
 }
 
-export function isDelegatedUserClaims(payload: Record<string, unknown>): boolean {
+export function isDelegatedUserClaims(
+  payload: Record<string, unknown>,
+  requiredScope = 'access_as_user',
+): boolean {
   return typeof payload.oid === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
       .test(payload.oid) &&
     typeof payload.scp === 'string' &&
-    payload.scp.trim().length > 0 &&
+    payload.scp.split(/\s+/u).includes(requiredScope) &&
     payload.idtyp !== 'app';
 }
 
