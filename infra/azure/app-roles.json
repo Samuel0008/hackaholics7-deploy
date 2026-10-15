@@ -1,0 +1,32 @@
+[
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Allows an approved, signed-in bank employee to enroll a passkey and use encrypted-message operations.",
+    "displayName": "Bank Employee API",
+    "id": "c653f82e-6451-4bf1-8f6a-2dddeebeb1a2",
+    "isEnabled": true,
+    "value": "Bank.Employee"
+  },
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Allows an approved, signed-in bank security administrator to manage devices and review decoy alerts.",
+    "displayName": "Bank Security Administrator API",
+    "id": "892bf73d-44f9-4d69-91a1-2f48027a5bc9",
+    "isEnabled": true,
+    "value": "Bank.SecurityAdmin"
+  },
+  {
+    "allowedMemberTypes": [
+      "User"
+    ],
+    "description": "Allows an approved, signed-in bank compliance user to request escrow decryption and view its audit records.",
+    "displayName": "Bank Compliance API",
+    "id": "42a516d8-7f22-4a92-9cc5-1951ed31c887",
+    "isEnabled": true,
+    "value": "Bank.Compliance"
+  }
+]
