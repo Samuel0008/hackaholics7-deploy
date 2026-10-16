@@ -31,28 +31,78 @@ function hasStatusCode(error: unknown, statusCode: number): boolean {
   return error instanceof Error && 'statusCode' in error && error.statusCode === statusCode;
 }
 
+class InMemoryTableClient {
+  private data = new Map<string, TableEntity>();
+
+  async createTable(): Promise<void> {}
+
+  async createEntity(entity: TableEntity): Promise<void> {
+    const key = `${entity.partitionKey}:${entity.rowKey}`;
+    this.data.set(key, { ...entity, etag: 'W/"datetime\'2026-10-15T00%3A00%3A00.000Z\'"' });
+  }
+
+  async upsertEntity(entity: TableEntity, _mode?: string): Promise<void> {
+    const key = `${entity.partitionKey}:${entity.rowKey}`;
+    this.data.set(key, { ...entity, etag: 'W/"datetime\'2026-10-15T00%3A00%3A00.000Z\'"' });
+  }
+
+  async getEntity<T extends object>(partitionKey: string, rowKey: string): Promise<T> {
+    const key = `${partitionKey}:${rowKey}`;
+    const entity = this.data.get(key);
+    if (!entity) {
+      const err = new Error('ResourceNotFound');
+      (err as unknown as { statusCode: number }).statusCode = 404;
+      throw err;
+    }
+    return entity as unknown as T;
+  }
+
+  async updateEntity(entity: TableEntity, _mode?: string, _options?: unknown): Promise<void> {
+    const key = `${entity.partitionKey}:${entity.rowKey}`;
+    const existing = this.data.get(key) || {};
+    this.data.set(key, { ...existing, ...entity, etag: 'W/"datetime\'2026-10-15T00%3A00%3A00.000Z\'"' });
+  }
+
+  async deleteEntity(partitionKey: string, rowKey: string, _options?: unknown): Promise<void> {
+    const key = `${partitionKey}:${rowKey}`;
+    this.data.delete(key);
+  }
+
+  async *listEntities<T extends object>(_options?: unknown): AsyncIterable<T> {
+    for (const entity of this.data.values()) {
+      yield entity as unknown as T;
+    }
+  }
+}
+
 function table(name: keyof typeof tableNames): TableClient {
   const existing = clients.get(name);
   if (existing) return existing;
 
+  const isDemo = process.env.DEMO_MODE === 'true';
   const connectionString = process.env.AzureWebJobsStorage;
   const endpoint = process.env.TABLES_ENDPOINT;
-  if (connectionString) {
+
+  if (connectionString && !connectionString.includes('UseDevelopmentStorage=true') && connectionString !== 'mock') {
     const client = TableClient.fromConnectionString(connectionString, tableNames[name]);
     clients.set(name, client);
     return client;
   }
 
-  if (!endpoint) {
-    throw new Error('AzureWebJobsStorage or TABLES_ENDPOINT must be configured.');
+  if (endpoint && endpoint.startsWith('https://')) {
+    const client = new TableClient(endpoint, tableNames[name], new DefaultAzureCredential());
+    clients.set(name, client);
+    return client;
   }
-  const parsedEndpoint = new URL(endpoint);
-  if (parsedEndpoint.protocol !== 'https:' || parsedEndpoint.pathname !== '/') {
-    throw new Error('TABLES_ENDPOINT must be an HTTPS storage endpoint.');
+
+  if (isDemo || !connectionString || connectionString.includes('UseDevelopmentStorage=true') || connectionString === 'mock') {
+    console.log(`[DEMO_MODE] Using in-memory table client for table: ${tableNames[name]}`);
+    const mockClient = new InMemoryTableClient() as unknown as TableClient;
+    clients.set(name, mockClient);
+    return mockClient;
   }
-  const client = new TableClient(endpoint, tableNames[name], new DefaultAzureCredential());
-  clients.set(name, client);
-  return client;
+
+  throw new Error('AzureWebJobsStorage or TABLES_ENDPOINT must be configured.');
 }
 
 async function initialize(): Promise<void> {
