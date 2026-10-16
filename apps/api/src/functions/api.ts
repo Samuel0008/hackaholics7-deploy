@@ -7,7 +7,7 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from '@simplewebauthn/server';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   createDecoyAuditExport,
   createDecoyDatabaseBackup,
@@ -385,7 +385,7 @@ app.http('registrationOptions', {
       rpID: rpId,
       userName: body.userName,
       userDisplayName: body.userName,
-      userID: Buffer.from(userId, 'utf8'),
+      userID: createHash('sha256').update(userId, 'utf8').digest(),
       attestationType: 'none',
       excludeCredentials: credentials
         .filter((credential) => !credential.revoked)

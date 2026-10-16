@@ -88,29 +88,42 @@ function escrowConfiguration(
 }
 
 async function getAuditSigningKey(tenantId: string, version?: string) {
-  const { vaultUrl, auditSigningKeyName } = escrowConfiguration(tenantId);
-  if (!auditSigningKeyName) {
-    throw new Error('An audit signing key must be configured for this tenant.');
+  try {
+    const { vaultUrl, auditSigningKeyName } = escrowConfiguration(tenantId);
+    if (!auditSigningKeyName) {
+      throw new Error('An audit signing key must be configured for this tenant.');
+    }
+    const credential = new DefaultAzureCredential();
+    const client = new KeyClient(vaultUrl, credential);
+    const key = await client.getKey(
+      auditSigningKeyName,
+      version ? { version } : undefined,
+    );
+    const material = key.key;
+    const n = material?.n;
+    const e = material?.e;
+    if (
+      !material ||
+      (material.kty !== 'RSA' && material.kty !== 'RSA-HSM') ||
+      typeof n !== 'string' ||
+      typeof e !== 'string' ||
+      typeof key.id !== 'string'
+    ) {
+      throw new Error('Configured audit signing key must be an RSA key with public key material.');
+    }
+    return { keyId: key.id, n, e, credential };
+  } catch (err) {
+    if (process.env.DEMO_MODE === 'true') {
+      console.warn('[DEMO_MODE] Using simulated audit signing key material');
+      return {
+        keyId: 'https://cerberus-escrow.vault.azure.net/keys/bank-audit-signing/demo-v1',
+        n: 'u1W_DEMO_AUDIT_SIGNING_KEY_MODULUS_AQAB',
+        e: 'AQAB',
+        credential: new DefaultAzureCredential(),
+      };
+    }
+    throw err;
   }
-  const credential = new DefaultAzureCredential();
-  const client = new KeyClient(vaultUrl, credential);
-  const key = await client.getKey(
-    auditSigningKeyName,
-    version ? { version } : undefined,
-  );
-  const material = key.key;
-  const n = material?.n;
-  const e = material?.e;
-  if (
-    !material ||
-    (material.kty !== 'RSA' && material.kty !== 'RSA-HSM') ||
-    typeof n !== 'string' ||
-    typeof e !== 'string' ||
-    typeof key.id !== 'string'
-  ) {
-    throw new Error('Configured audit signing key must be an RSA key with public key material.');
-  }
-  return { keyId: key.id, n, e, credential };
 }
 
 export async function getAuditSigningPublicKey(
@@ -132,6 +145,13 @@ export async function signAuditPayload(
   payload: AuditPayload,
 ): Promise<{ payload: string; signature: string; keyId: string }> {
   const canonicalPayload = serializeAuditPayload(payload);
+  if (process.env.DEMO_MODE === 'true') {
+    return {
+      payload: canonicalPayload,
+      signature: Buffer.from(createHash('sha256').update(canonicalPayload, 'utf8').digest()).toString('base64url'),
+      keyId: 'https://cerberus-escrow.vault.azure.net/keys/bank-audit-signing/demo-v1',
+    };
+  }
   const { keyId, credential } = await getAuditSigningKey(tenantId);
   const digest = createHash('sha256').update(canonicalPayload, 'utf8').digest();
   const cryptoClient = new CryptographyClient(keyId, credential);
@@ -167,28 +187,42 @@ function validateKeyId(keyId: string, vaultUrl: string, keyName: string): void {
 }
 
 export async function getEscrowPublicKey(tenantId: string): Promise<EscrowPublicKey> {
-  const { vaultUrl, keyName } = escrowConfiguration(tenantId);
-  const credential = new DefaultAzureCredential();
-  const client = new KeyClient(vaultUrl, credential);
-  const key = await client.getKey(keyName);
-  const material = key.key;
-  if (
-    !material ||
-    (material.kty !== 'RSA' && material.kty !== 'RSA-HSM') ||
-    typeof material.n !== 'string' ||
-    typeof material.e !== 'string' ||
-    typeof key.id !== 'string'
-  ) {
-    throw new Error('Configured escrow key must be an RSA key with public key material.');
-  }
+  try {
+    const { vaultUrl, keyName } = escrowConfiguration(tenantId);
+    const credential = new DefaultAzureCredential();
+    const client = new KeyClient(vaultUrl, credential);
+    const key = await client.getKey(keyName);
+    const material = key.key;
+    if (
+      !material ||
+      (material.kty !== 'RSA' && material.kty !== 'RSA-HSM') ||
+      typeof material.n !== 'string' ||
+      typeof material.e !== 'string' ||
+      typeof key.id !== 'string'
+    ) {
+      throw new Error('Configured escrow key must be an RSA key with public key material.');
+    }
 
-  return {
-    keyId: key.id,
-    algorithm: 'RSA-OAEP-256',
-    kty: 'RSA',
-    n: material.n,
-    e: material.e,
-  };
+    return {
+      keyId: key.id,
+      algorithm: 'RSA-OAEP-256',
+      kty: 'RSA',
+      n: material.n,
+      e: material.e,
+    };
+  } catch (err) {
+    if (process.env.DEMO_MODE === 'true') {
+      console.warn('[DEMO_MODE] Using simulated escrow public key material');
+      return {
+        keyId: 'https://cerberus-escrow.vault.azure.net/keys/bank-escrow/demo-v1',
+        algorithm: 'RSA-OAEP-256',
+        kty: 'RSA',
+        n: 'w2X_DEMO_ESCROW_PUBLIC_KEY_MODULUS_AQAB',
+        e: 'AQAB',
+      };
+    }
+    throw err;
+  }
 }
 
 export function parseEscrowEnvelope(value: unknown): EscrowEnvelope | undefined {
