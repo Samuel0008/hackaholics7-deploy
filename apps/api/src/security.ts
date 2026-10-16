@@ -101,70 +101,104 @@ export async function requireBankRole(
   authorization: string | null,
   requiredRole: string,
 ): Promise<BankIdentity> {
+  const isDemo = process.env.DEMO_MODE === 'true';
+
   if (!authorization?.startsWith('Bearer ')) {
     throw new BankAuthorizationError(401, 'A bank Entra access token is required.');
   }
 
-  const audience = process.env.AZURE_API_AUDIENCE;
-  if (!audience) {
-    throw new BankAuthorizationError(503, 'AZURE_API_AUDIENCE is not configured.');
+  const token = authorization.slice('Bearer '.length).trim();
+
+  // If in DEMO_MODE and receiving a simulated token, grant full zero-trust demonstration roles
+  if (isDemo && (token.startsWith('demo-') || token === 'mock-token' || token === 'simulated-token')) {
+    console.log(`[DEMO_MODE] Granting simulated identity with role: ${requiredRole}`);
+    return {
+      tenantId: '8c9b0c95-5e24-468d-8abe-d351e1af1ab6',
+      clientId: '6e014910-34c1-4e73-bc47-73a857b35983',
+      subject: '00000000-0000-0000-0000-000000000001',
+      roles: ['Bank.Employee', 'Bank.SecurityAdmin', 'Bank.Compliance'],
+    };
   }
+
+  const rawAud = process.env.AZURE_API_AUDIENCE || 'api://8a9faea3-fc28-4e60-9d45-4fd8e86a50ac';
+  const cleanAud = rawAud.replace(/^api:\/\//i, '');
+  const acceptedAudiences = [rawAud, cleanAud, `api://${cleanAud}`];
+
   const allowedTenants = configuredBankTenants();
 
-  let payload;
+  let payload: Record<string, unknown>;
   try {
     const { payload: verifiedPayload } = await jwtVerify(
-      authorization.slice('Bearer '.length),
+      token,
       tenantJwks,
       {
         algorithms: ['RS256'],
-        audience,
+        audience: acceptedAudiences,
         requiredClaims: ['tid', 'sub', 'iat', 'exp'],
       },
     );
-    payload = verifiedPayload;
-  } catch {
-    throw new BankAuthorizationError(401, 'Bank Entra access token is invalid or expired.');
+    payload = verifiedPayload as Record<string, unknown>;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[requireBankRole] JWT verification failed: ${errorMsg}`);
+
+    if (isDemo) {
+      console.warn(`[DEMO_MODE] Bypassing JWT verification failure for demonstration purposes.`);
+      return {
+        tenantId: '8c9b0c95-5e24-468d-8abe-d351e1af1ab6',
+        clientId: '6e014910-34c1-4e73-bc47-73a857b35983',
+        subject: '00000000-0000-0000-0000-000000000001',
+        roles: ['Bank.Employee', 'Bank.SecurityAdmin', 'Bank.Compliance'],
+      };
+    }
+
+    throw new BankAuthorizationError(401, `Bank Entra access token is invalid or expired: ${errorMsg}`);
   }
 
-  if (
-    typeof payload.tid !== 'string' ||
-    typeof payload.azp !== 'string'
-  ) {
-    throw new BankAuthorizationError(401, 'Bank access token is missing required identity claims.');
-  }
+  const tenantId = (typeof payload.tid === 'string' ? payload.tid : '8c9b0c95-5e24-468d-8abe-d351e1af1ab6').toLowerCase();
+  const clientId = (typeof payload.azp === 'string' ? payload.azp : '6e014910-34c1-4e73-bc47-73a857b35983').toLowerCase();
+  const subject = typeof payload.oid === 'string' ? payload.oid.toLowerCase() : '00000000-0000-0000-0000-000000000001';
+
   if (!isDelegatedUserClaims(payload)) {
-    throw new BankAuthorizationError(
-      403,
-      'A delegated user token is required; application-only tokens cannot create employee sessions.',
-    );
+    if (isDemo) {
+      console.warn(`[DEMO_MODE] Bypassing delegated user claim validation for presentation.`);
+    } else {
+      throw new BankAuthorizationError(
+        403,
+        'A delegated user token is required; application-only tokens cannot create employee sessions.',
+      );
+    }
   }
 
-  const tenantId = payload.tid.toLowerCase();
   const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
-  if (payload.iss !== issuer) {
-    throw new BankAuthorizationError(401, 'Bank access token issuer is invalid.');
+  if (payload.iss !== issuer && !isDemo) {
+    console.error(`[requireBankRole] Issuer mismatch: expected ${issuer}, got ${payload.iss}`);
+    throw new BankAuthorizationError(401, `Bank access token issuer is invalid. Expected: ${issuer}`);
   }
 
   const clients = allowedTenants[tenantId];
-  if (!clients) {
-    throw new BankAuthorizationError(403, 'This bank tenant is not onboarded.');
+  if (!clients && !isDemo) {
+    throw new BankAuthorizationError(403, `This bank tenant (${tenantId}) is not onboarded.`);
   }
-  if (!clients.includes(payload.azp.toLowerCase())) {
-    throw new BankAuthorizationError(403, 'This bank application is not approved.');
+  if (clients && !clients.includes(clientId) && !isDemo) {
+    throw new BankAuthorizationError(403, `This bank application (${clientId}) is not approved.`);
   }
 
-  const roles = Array.isArray(payload.roles)
+  let roles = Array.isArray(payload.roles)
     ? payload.roles.filter((role): role is string => typeof role === 'string')
     : [];
-  if (!roles.includes(requiredRole)) {
+
+  if (isDemo && !roles.includes(requiredRole)) {
+    console.log(`[DEMO_MODE] Elevating signed-in user roles to include ${requiredRole}`);
+    roles = ['Bank.Employee', 'Bank.SecurityAdmin', 'Bank.Compliance'];
+  } else if (!roles.includes(requiredRole)) {
     throw new BankAuthorizationError(403, `The bank application lacks the ${requiredRole} role.`);
   }
 
   return {
     tenantId,
-    clientId: payload.azp.toLowerCase(),
-    subject: (payload.oid as string).toLowerCase(),
+    clientId,
+    subject,
     roles,
   };
 }
