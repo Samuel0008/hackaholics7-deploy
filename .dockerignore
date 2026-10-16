@@ -1,0 +1,9 @@
+node_modules
+.git
+.github
+cerberus-frontend-main
+docs
+infra
+infrastructure
+.vscode
+
